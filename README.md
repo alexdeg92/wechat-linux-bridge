@@ -1,200 +1,248 @@
-# WeChat Linux Bridge 🐧💬
+# wechat-linux-bridge
 
-Run WeChat desktop on Linux via Wine with automated message sending and receiving through DLL injection.
+Run WeChat desktop (Windows version) on Linux via Wine with full message send/receive automation through DLL injection.
 
-## What is this?
+No Frida required. No ADB. No virtual machine. Just Wine + a small injected Win32 DLL.
 
-This project lets you run WeChat on a headless Linux server and programmatically send/receive messages. It works by:
+---
 
-1. Running WeChat.exe inside Wine on a virtual display (Xvfb)
-2. Injecting a custom DLL (`wxsend.dll`) that hooks WeChat's internal send/receive functions
-3. Exposing an HTTP API (port 19088) for sending messages and reading incoming ones
-4. Running a Python webhook receiver that routes messages to your application
+## What It Is
+
+This project lets you **send and receive WeChat messages programmatically on Linux** by:
+
+1. Running WeChat Windows desktop app inside Wine
+2. Injecting a custom Win32 DLL (`wxsend.dll`) into the WeChat process
+3. The DLL hooks WeChat's internal send/receive functions directly
+4. A Python receiver (`wechat_webhook_receiver.py`) dispatches incoming messages and can route them to any handler — including an AI agent
+
+**Tested with:** WeChat 3.9.2.23 on Wine 8.x / 9.x (Linux x86_64)
+
+---
 
 ## Architecture
 
 ```
-┌──────────────────────────────────────────────────────┐
-│                    Wine Environment                    │
-│                                                        │
-│  WeChat.exe ──► wxsend.dll (injected)                 │
-│                    │                                   │
-│                    ├── HTTP Server :19088              │
-│                    │     GET /status                   │
-│                    │     GET /messages?since=TS         │
-│                    │     POST /api/?type=2 (send)       │
-│                    │                                   │
-│                    └── File write (inotify)            │
-│                         /tmp/wechat_incoming.jsonl     │
-└──────────────────────────────────────────────────────┘
-         │                        │
-         ▼                        ▼
-┌─────────────────┐    ┌──────────────────────┐
-│  wechat_frida_  │    │ wechat_webhook_      │
-│  send.py        │    │ receiver.py          │
-│  (send msgs)    │    │ (receive + route)    │
-│                 │    │                      │
-│  CLI tool for   │    │ inotify watcher +    │
-│  sending text   │    │ HTTP webhook +       │
-│  and files      │    │ polling fallback     │
-└─────────────────┘    └──────────────────────┘
-                              │
-                              ▼
-                       Your Application
-                       (AI bot, custom handler, etc.)
+┌─────────────────────────────────────────────────────┐
+│  Wine process (WeChat.exe)                          │
+│                                                     │
+│  WeChatWin.dll                                      │
+│    ↕ hook (JMP patch)                               │
+│  wxsend.dll (injected)                              │
+│    ├── HTTP server :19088  ←── wechat_frida_send.py │
+│    └── inotify file write  ──→ wechat_webhook_      │
+│         /tmp/wechat_incoming.jsonl    receiver.py   │
+└─────────────────────────────────────────────────────┘
 ```
+
+**Receive path (inotify, zero-polling):**
+- `wxsend.dll` appends JSON lines to `/tmp/wechat_incoming.jsonl` (via Wine's `Z:\tmp\`)
+- Python uses `inotify` to watch the file — fires instantly on any write
+- Messages are dispatched to per-sender worker threads
+
+**Send path:**
+- `wechat_frida_send.py <wxid> <message>` POSTs to the DLL's HTTP server on `:19088`
+- The DLL calls WeChat's `SendTextMsg` on the UI thread via `SendMessage(WM_WXSEND, ...)`
+
+---
 
 ## Prerequisites
 
-- **Linux** (tested on Ubuntu 22.04/24.04)
-- **Wine** (stable, 32-bit): `apt install wine32`
-- **Xvfb** (virtual display): `apt install xvfb`
-- **Python 3.10+** with pip
-- **Cross-compiler** (for DLL compilation): `apt install g++-mingw-w64-i686`
-- **WeChat** Windows installer (v3.9.2.23 tested)
+- Linux x86_64
+- Wine (wine32 + wine64) installed
+- Python 3.11+
+- `xdotool` (for auto-clicking login dialogs)
+- `Xvfb` (virtual framebuffer — or a real X display)
+- `curl` (for startup verification)
+- WeChat Windows installer (v3.9.2.23 recommended — offsets are version-specific)
 
-## Quick Start
+---
+
+## Setup
 
 ### 1. Install WeChat in Wine
 
 ```bash
 export WINEPREFIX=~/.wechat-wine
-WINEARCH=win32 winecfg  # Initialize 32-bit prefix
-wine WeChat_Setup.exe    # Install WeChat
+WINEARCH=win32 wineboot --init
+wine WeChatSetup.exe   # install WeChat
 ```
 
-### 2. Set up virtual display
+### 2. Clone this repo
 
 ```bash
-Xvfb :99 -screen 0 1024x768x24 &
-export DISPLAY=:99
+git clone https://github.com/youruser/wechat-linux-bridge
+cd wechat-linux-bridge
 ```
 
-### 3. Start WeChat
+### 3. Configure environment
 
 ```bash
 cp .env.example .env
-# Edit .env with your paths
-bash start-wechat.sh
+# Edit .env with your paths and settings
 ```
 
-### 4. Scan QR code to log in
+Key variables:
+| Variable | Description |
+|---|---|
+| `WINEPREFIX` | Path to Wine prefix where WeChat is installed |
+| `WECHAT_EXE_PATH` | Full path to `WeChat.exe` inside the Wine prefix |
+| `SELF_WXID` | Your own WeChat ID (to filter self-messages) |
+| `INJECT_EXE` | Path to `inject2.exe` |
+| `WXSEND_DLL` | Path to `wxsend.dll` |
+
+### 4. Install Python dependencies
 
 ```bash
-# Take a screenshot to see the QR code
-scrot /tmp/wechat_qr.png
-# View it on your local machine and scan with WeChat mobile app
-```
-
-> **Tip:** Enable auto-login in WeChat settings so you don't need to scan QR after restarts.
-
-### 5. Install Python dependencies
-
-```bash
+python3 -m venv venv
+source venv/bin/activate
 pip install -r requirements.txt
 ```
 
-### 6. Send a test message
+### 5. Start WeChat with DLL injection
 
 ```bash
-python3 wechat_frida_send.py <target_wxid> "Hello from Linux!"
+source .env
+bash start-wechat.sh
 ```
 
-### 7. Start the webhook receiver
+This will:
+- Start Xvfb if needed
+- Launch WeChat under Wine
+- Inject `wxsend.dll` into the WeChat process
+- Verify the hook is live on port 19088
+
+### 6. Start the webhook receiver
 
 ```bash
+source venv/bin/activate
 python3 wechat_webhook_receiver.py
 ```
 
-## Compiling the DLL
+---
 
-If you need to recompile `wxsend.dll`:
-
-```bash
-i686-w64-mingw32-g++ -shared -o bin/wxsend.dll src/wxsend.cpp \
-  -lwsock32 -lws2_32 -static-libgcc -static-libstdc++
-```
-
-## Configuration
-
-All configuration is via environment variables. See `.env.example` for the full list.
-
-Key variables:
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `WINEPREFIX` | `~/.wine` | Wine prefix where WeChat is installed |
-| `WXSEND_URL` | `http://127.0.0.1:19088` | DLL HTTP server URL |
-| `WEBHOOK_PORT` | `19089` | Webhook receiver listen port |
-| `SELF_WXID` | _(required)_ | Your WeChat ID (to filter own messages) |
-| `GATEWAY_URL` | _(optional)_ | AI gateway URL for message routing |
-| `GATEWAY_TOKEN` | _(optional)_ | AI gateway auth token |
-| `WECHAT_MODEL` | _(optional)_ | AI model for WeChat sessions |
-
-## HTTP API (DLL)
-
-Once injected, the DLL exposes:
-
-- `GET /status` — `{"hwnd": N, "hooked": 1, "msgCount": N}`
-- `GET /messages?since=TIMESTAMP` — Get messages since Unix timestamp
-- `POST /api/?type=2` — Send text: `{"wxid": "...", "msg": "..."}`
-
-### Send return codes
-
-The `code` field in send responses is the restored EAX register value (not a return code). A response with `result: "OK"` means the send executed successfully regardless of the code value.
-
-## Systemd Service
+## Sending Messages
 
 ```bash
-sudo cp wechat-webhook.service /etc/systemd/system/
-sudo cp wechat.slice /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable --now wechat-webhook.service
+# Text message
+python3 wechat_frida_send.py wxid_xxxxxxxxxxxxxxxx "Hello from Linux!"
+
+# With explicit flag
+python3 wechat_frida_send.py wxid_xxxxxxxxxxxxxxxx -m "Hello!"
+
+# File/image
+python3 wechat_frida_send.py wxid_xxxxxxxxxxxxxxxx -f /path/to/image.jpg
+
+# Group chat
+python3 wechat_frida_send.py 12345678901@chatroom "Hello group!"
 ```
 
-The `wechat.slice` limits CPU (80%) and RAM (6GB) to prevent WeChat from consuming all resources.
+---
 
-## Supported WeChat Versions
+## Receiving Messages
 
-| Version | Status | Notes |
-|---------|--------|-------|
-| 3.9.2.23 | ✅ Tested | Recommended |
-| 3.9.2.26 | ⚠️ Offsets included | Untested |
+By default, incoming messages are logged. To route them to a custom handler, edit `_process_message_blocking()` in `wechat_webhook_receiver.py`.
 
-For other versions, you'll need to find the correct offsets for `SendTextMsg`, `GetSendMessageMgr`, `FreeChatMsg`, and the receive hook in `WeChatWin.dll`.
+To integrate with an AI gateway (e.g. OpenClaw), set:
+```
+GATEWAY_URL=http://your-gateway/tools/invoke
+GATEWAY_TOKEN=your_token
+```
+
+Messages will be routed to `sessions_send` with key `agent:main:wechat:<wxid>`.
+
+---
+
+## Compiling `wxsend.dll` from Source
+
+The prebuilt DLL is in `bin/wxsend.dll`. To rebuild:
+
+**Requirements:**
+- MinGW-w64 cross-compiler (`i686-w64-mingw32-g++`)
+- Windows SDK headers (via MinGW)
+
+```bash
+i686-w64-mingw32-g++ \
+  -shared \
+  -o bin/wxsend.dll \
+  src/wxsend.cpp \
+  -lws2_32 \
+  -luser32 \
+  -static-libgcc \
+  -static-libstdc++ \
+  -O2 \
+  -s
+```
+
+> **Note:** The function offsets in `wxsend.cpp` are specific to **WeChatWin.dll v3.9.2.23**.
+> If you use a different version, you must find the correct offsets using a disassembler
+> (IDA, Ghidra, x64dbg). Refer to the [wxhelper](https://github.com/ttttupup/wxhelper) project
+> for offset tables.
+
+---
+
+## DLL Offsets (WeChatWin.dll v3.9.2.23)
+
+| Symbol | Offset | Description |
+|--------|--------|-------------|
+| `WX_SEND_TEXT_OFFSET` | `0xce6c80` | `SendTextMsg` function |
+| `WX_SEND_MESSAGE_MGR_OFFSET` | `0x768140` | `GetSendMessageMgr` |
+| `WX_FREE_CHAT_MSG_OFFSET` | `0x756960` | `FreeChatMsg` |
+| `WX_RECV_MSG_HOOK_OFFSET` | `0xd19a0b` | Receive hook insertion point |
+
+---
+
+## How inject2.exe Works
+
+`inject2.exe` is a standard Win32 DLL injector:
+1. Opens the target process with `OpenProcess(PROCESS_ALL_ACCESS, ...)`
+2. Allocates memory in the target with `VirtualAllocEx`
+3. Writes the DLL path to the allocated memory
+4. Creates a remote thread pointing to `LoadLibraryA`
+
+It's run under Wine: `wine inject2.exe <wine_pid> <Z:\path\to\wxsend.dll>`
+
+Wine's process IDs visible to `tasklist` are **Wine-internal PIDs** (usually small numbers like 32, 56), not Linux PIDs.
+
+---
 
 ## Known Issues
 
-- **Wine networking:** The DLL's built-in webhook push (`PostMessageToWebhook`) may not work under Wine's Winsock. The polling fallback handles this automatically.
-- **Send requires active GUI:** `SendTextMsg` uses `SendMessageW` to the WeChat window proc. If the GUI isn't rendering (black screen), sends may silently fail.
-- **Multiple DLL injections:** Re-injecting the DLL while a previous instance is loaded will fail to bind the HTTP port. Restart WeChat for a clean injection.
-- **WeChat updates:** Any WeChat update will likely change DLL offsets, breaking the hooks. Pin your WeChat version.
+- **Version sensitivity:** Offsets are hardcoded for v3.9.2.23. Other WeChat versions will crash or silently fail.
+- **Wine process enumeration:** `wine tasklist` can be slow (~3–5s). Plan accordingly.
+- **Hook stability:** The receive hook patches 5 bytes at the hook site with a JMP. If WeChat updates or reloads `WeChatWin.dll`, the hook will be lost until re-injection.
+- **32-bit Wine:** WeChat.exe is a 32-bit PE binary. You need `wine32` support (`WINEARCH=win32`).
+- **Auto-login:** If WeChat shows a QR code or "Open WeChat" dialog on launch, you may need to handle it once manually. After initial login, WeChat typically stays logged in via the Wine profile's saved credentials.
+- **inotify on `/tmp`:** The DLL writes to `Z:\tmp\wechat_incoming.jsonl` = `/tmp/wechat_incoming.jsonl`. Make sure `/tmp` is a real filesystem (not tmpfs restrictions) and the file is writable.
 
-## Troubleshooting
+---
 
-**DLL not responding on port 19088:**
-- Check if WeChat.exe is running: `pgrep -fa WeChat.exe`
-- Re-inject: `wine bin/inject2.exe <wine_pid> Z:\\path\\to\\wxsend.dll`
-- Check for port conflicts: `ss -tlnp | grep 19088`
+## File Structure
 
-**Messages received but replies not sending:**
-- Check DLL status: `curl http://127.0.0.1:19088/status`
-- If `hooked: 0`, the hook didn't attach — re-inject
-- If `code: 0` on send, WeChat's internal state may be broken — restart WeChat
+```
+wechat-linux-bridge/
+├── bin/
+│   ├── wxsend.dll          # Prebuilt Win32 hook DLL (injected into WeChat)
+│   └── inject2.exe         # Win32 DLL injector (run via wine)
+├── src/
+│   └── wxsend.cpp          # DLL source code
+├── wechat_webhook_receiver.py  # Python receiver (inotify + HTTP webhook)
+├── wechat_frida_send.py        # Python sender (HTTP → DLL)
+├── start-wechat.sh             # Startup script
+├── requirements.txt
+├── .env.example
+├── .gitignore
+└── LICENSE
+```
 
-**WeChat shows black screen:**
-- Ensure only ONE Xvfb instance on your display: `pgrep -fa Xvfb`
-- Kill duplicates and restart: `pkill Xvfb && Xvfb :99 -screen 0 1024x768x24 &`
-
-## Credits
-
-- DLL injection technique inspired by [wxhelper](https://github.com/ttttupup/wxhelper)
-- Offset research from the WeChat reverse engineering community
+---
 
 ## License
 
-MIT — see [LICENSE](LICENSE)
+MIT — see [LICENSE](LICENSE).
 
-## ⚠️ Disclaimer
+---
 
-This project is for educational and personal use only. Automated messaging may violate WeChat's Terms of Service. Use at your own risk.
+## Credits
+
+- DLL hooking approach inspired by the [wxhelper](https://github.com/ttttupup/wxhelper) project
+- SQLCipher key extraction technique from [pywxdump](https://github.com/xaoyaoo/PyWxDump)
