@@ -1,0 +1,42 @@
+{
+  "_comment": "Copy to config.json and fill in your values. Env vars take precedence over config file.",
+
+  "gateway": {
+    "url": "http://localhost:18789/tools/invoke",
+    "token": "your_gateway_token_here",
+    "session_prefix": "wechat:",
+    "send_timeout_seconds": 60,
+    "model_override": ""
+  },
+
+  "wechat": {
+    "self_wxid": "wxid_your_wxid_here",
+    "bot_mention": "@YourBotName",
+    "version": "3.9.2.23"
+  },
+
+  "wine": {
+    "prefix": "~/.wechat-wine",
+    "display": ":99"
+  },
+
+  "paths": {
+    "plugin_dir": "./wechat-dll",
+    "send_script": "./wechat_frida_send.py",
+    "incoming_file": "/tmp/wechat_incoming.jsonl",
+    "media_temp_dir": "/tmp/wechat_media",
+    "log_file": "/var/log/wechat_webhook.log"
+  },
+
+  "server": {
+    "webhook_host": "0.0.0.0",
+    "webhook_port": 19089,
+    "wxsend_url": "http://127.0.0.1:19088"
+  },
+
+  "wechat_version_offsets": {
+    "_comment": "WeChatWin.dll offsets for SQLCipher key extraction. Source: wxhelper project.",
+    "3.9.2.23": [802849168, 802850608, 802848000, 623034744, 802850572],
+    "3.9.2.26": [805303856, 805305392, 805303040, 623034744, 805305356]
+  }
+}

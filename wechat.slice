@@ -1,0 +1,9 @@
+[Unit]
+Description=WeChat CPU/Memory Limit Slice
+
+[Slice]
+# Limit WeChat process resource usage
+# Adjust these values based on your system capacity
+CPUQuota=80%
+MemoryMax=6G
+MemoryHigh=5G

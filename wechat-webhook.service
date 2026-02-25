@@ -1,0 +1,30 @@
+[Unit]
+Description=WeChat Linux Bridge — Webhook Receiver
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=YOUR_USERNAME
+WorkingDirectory=/path/to/wechat-linux-bridge
+# Load environment from .env file
+EnvironmentFile=/path/to/wechat-linux-bridge/.env
+ExecStart=/path/to/wechat-linux-bridge/venv/bin/python3 /path/to/wechat-linux-bridge/wechat_webhook_receiver.py
+Restart=always
+RestartSec=10
+
+# Resource isolation
+PrivateTmp=yes
+NoNewPrivileges=yes
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=wechat-webhook
+
+# Timeouts
+TimeoutStartSec=30
+TimeoutStopSec=10
+
+[Install]
+WantedBy=multi-user.target
